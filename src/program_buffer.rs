@@ -103,17 +103,17 @@ impl ProgramBuffer {
     }
 
     fn i32(&mut self, v: i32) -> &mut Self {
-        self.buf.extend(v.to_le_bytes());
+        self.bytes(v.to_le_bytes());
         self
     }
 
     fn u32(&mut self, v: u32) -> &mut Self {
-        self.buf.extend(v.to_le_bytes());
+        self.bytes(v.to_le_bytes());
         self
     }
 
     fn u64(&mut self, v: u64) -> &mut Self {
-        self.buf.extend(v.to_le_bytes());
+        self.bytes(v.to_le_bytes());
         self
     }
 
