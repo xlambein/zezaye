@@ -1,4 +1,4 @@
-use std::{alloc::Allocator, ptr::NonNull};
+use std::{alloc::Allocator, fmt, ptr::NonNull};
 
 use nix::sys::mman::{mmap, mprotect, munmap, MapFlags, ProtFlags};
 
@@ -33,6 +33,17 @@ unsafe impl Allocator for PageAllocator {
 
 pub struct ProgramBuffer {
     buf: Vec<u8, PageAllocator>,
+}
+
+impl fmt::Display for ProgramBuffer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{{")?;
+        for b in &self.buf {
+            write!(f, "{:02x} ", b)?;
+        }
+        write!(f, "}}")?;
+        Ok(())
+    }
 }
 
 impl ProgramBuffer {
@@ -180,6 +191,13 @@ impl ProgramBuffer {
         // TODO check for overflow
         self.byte(REX_PREFIX)
             .byte(0x03)
+            .byte(0x40 + (dst as u8) * 8 + src.0 as u8)
+            .byte(src.1 as u8)
+    }
+
+    pub fn store_indirect_reg(&mut self, dst: Register, src: Indirect) -> &mut Self {
+        self.byte(REX_PREFIX)
+            .byte(0x8b)
             .byte(0x40 + (dst as u8) * 8 + src.0 as u8)
             .byte(src.1 as u8)
     }

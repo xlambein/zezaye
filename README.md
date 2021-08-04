@@ -15,7 +15,7 @@ With Rust installed, simply clone this repo and execute `cargo run` to start a (
 
 ```
 $ cargo run
-zezaye> (+ (+ 1 2) (sub1 3))
+zezaye> (let ((x (sub1 3))) (+ (+ 1 2) x))
 Int(5)
 zezaye> 
 bye!
