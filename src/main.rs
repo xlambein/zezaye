@@ -3,24 +3,59 @@
 mod compiler;
 mod object;
 mod program_buffer;
+mod reader;
+
+use std::io;
 
 use color_eyre::Result;
 use compiler::Compiler;
-use object::Object;
 use program_buffer::ProgramBuffer;
+use reader::Reader;
+
+use crate::object::Object;
+
+fn read_eval_print() -> Result<bool> {
+    eprint!("zezaye> ");
+
+    let mut input = String::new();
+    if io::stdin().read_line(&mut input)? == 0 {
+        eprintln!("\nbye!");
+        return Ok(false);
+    }
+
+    // Parse
+    let ast = Reader::from_str(&input).read_expr()?;
+    // eprintln!("{:?}", ast);
+
+    // Compile
+    let mut buffer = ProgramBuffer::new();
+    Compiler::new(&mut buffer).function(&ast);
+    // eprintln!("{:?}", buffer.as_slice());
+
+    // Execute
+    unsafe {
+        println!(
+            "{:?}",
+            Object::parse_word(buffer.make_executable().execute::<u64>())?
+        );
+    }
+
+    Ok(true)
+}
 
 fn main() -> Result<()> {
     color_eyre::install()?;
 
-    let mut buffer = ProgramBuffer::new();
-    Compiler::new(&mut buffer).function(&Object::Int(1234));
-
-    unsafe {
-        dbg!(buffer.make_executable().execute::<i32>());
+    loop {
+        match read_eval_print() {
+            Ok(cont) => {
+                if !cont {
+                    break;
+                }
+            }
+            Err(err) => eprintln!("error: {}", err),
+        }
     }
 
     Ok(())
 }
-
-#[cfg(test)]
-mod test {}
