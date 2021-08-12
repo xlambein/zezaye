@@ -1,4 +1,4 @@
-use std::{alloc::Allocator, fmt, ptr::NonNull};
+use std::{alloc::Allocator, ffi::c_void, fmt, ptr::NonNull};
 
 use nix::sys::mman::{mmap, mprotect, munmap, MapFlags, ProtFlags};
 
@@ -152,6 +152,13 @@ impl ProgramBuffer {
             .i32(src)
     }
 
+    pub fn add_reg_reg(&mut self, dst: Register, src: Register) -> &mut Self {
+        // TODO check for overflow
+        self.byte(REX_PREFIX)
+            .byte(0x01)
+            .byte(0xc0 + (src as u8) * 8 + dst as u8)
+    }
+
     pub fn sub_reg_imm32(&mut self, dst: Register, src: i32) -> &mut Self {
         // TODO check for overflow
         self.byte(REX_PREFIX)
@@ -166,6 +173,12 @@ impl ProgramBuffer {
             .byte(0xc1)
             .byte(0xe8 + dst as u8)
             .byte(src)
+    }
+
+    pub fn and_reg_reg(&mut self, dst: Register, src: Register) -> &mut Self {
+        self.byte(REX_PREFIX)
+            .byte(0x21)
+            .byte(0xc0 + (src as u8) * 8 + dst as u8)
     }
 
     pub fn cmp_reg_imm32(&mut self, dst: Register, src: u32) -> &mut Self {
@@ -215,6 +228,12 @@ impl ProgramBuffer {
 
     pub fn store_reg_reg_32(&mut self, dst: Register, src: Register) -> &mut Self {
         self.byte(0x89).byte(0xc0 + (src as u8) * 8 + dst as u8)
+    }
+
+    pub fn store_reg_reg(&mut self, dst: Register, src: Register) -> &mut Self {
+        self.byte(REX_PREFIX)
+            .byte(0x89)
+            .byte(0xc0 + (src as u8) * 8 + dst as u8)
     }
 
     pub fn jmp(&mut self, distance: i32) -> &mut Self {
@@ -269,9 +288,9 @@ impl ExecutableProgramBuffer {
         ProgramBuffer { buf: self.buf }
     }
 
-    pub unsafe fn execute<T>(&self) -> T {
-        let fun: unsafe extern "C" fn() -> T = std::mem::transmute(self.buf.as_ptr());
-        (fun)()
+    pub unsafe fn execute<T>(&self, heap: &mut [u8]) -> T {
+        let fun: unsafe extern "C" fn(*mut c_void) -> T = std::mem::transmute(self.buf.as_ptr());
+        (fun)(heap.as_mut_ptr() as *mut c_void)
     }
 
     pub fn as_slice(&self) -> &[u8] {
@@ -303,12 +322,12 @@ mod tests {
             .extend([0x48, 0xC7, 0xC0, 0xD2, 0x04, 0x00, 0x00, 0xC3]);
         unsafe {
             let buf = buf.make_executable();
-            assert_eq!(buf.execute::<i64>(), 1234);
+            assert_eq!(buf.execute::<i64>(&mut []), 1234);
             let mut buf = buf.make_writeable();
             buf.buf[3] = 26;
             buf.buf[4] = 0;
             let buf = buf.make_executable();
-            assert_eq!(buf.execute::<i64>(), 26);
+            assert_eq!(buf.execute::<i64>(&mut []), 26);
         }
     }
 

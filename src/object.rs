@@ -113,6 +113,8 @@ const TAG: Range<usize> = 48..51;
 const PAYLOAD: RangeTo<usize> = ..48;
 const IMM_TAG: Range<usize> = 32..48;
 
+pub const PAYLOAD_MASK: u64 = 0x0000FFFFFFFFFFFF;
+
 impl Object {
     pub fn to_word(&self) -> u64 {
         match self {
@@ -142,7 +144,8 @@ impl Object {
             Object::Nil => SNAN_HEADER
                 .with_bits(TAG, Tag::Immediate as u64)
                 .with_bits(IMM_TAG, ImmTag::Nil as u64),
-            Object::Pair(_, _) => todo!(),
+            // TODO change this
+            Object::Pair(_, _) => SNAN_HEADER.with_bits(TAG, Tag::Pair as u64),
             Object::Symbol(_) => todo!(),
         }
     }
@@ -161,7 +164,8 @@ impl Object {
                     ImmTag::Bool => Ok(Object::Bool(payload.bit(0))),
                     ImmTag::Nil => Ok(Object::Nil),
                 },
-                Tag::Pair => todo!(),
+                // TODO change this too
+                Tag::Pair => Ok(Object::Pair(box Object::Nil, box Object::Nil)),
                 Tag::Vector => todo!(),
                 Tag::String => todo!(),
                 Tag::Symbol => todo!(),

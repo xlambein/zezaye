@@ -14,6 +14,8 @@ use reader::Reader;
 
 use crate::object::Object;
 
+const HEAP_SIZE: usize = 2048;
+
 fn read_eval_print() -> Result<bool> {
     eprint!("zezaye> ");
 
@@ -36,7 +38,7 @@ fn read_eval_print() -> Result<bool> {
     unsafe {
         println!(
             "{:?}",
-            Object::parse_word(buffer.make_executable().execute::<u64>())?
+            Object::parse_word(buffer.make_executable().execute::<u64>(&mut [0; HEAP_SIZE]))?
         );
     }
 
