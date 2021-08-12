@@ -231,89 +231,73 @@ impl<'buffer> Compiler<'buffer> {
 
 #[cfg(test)]
 mod tests {
+    use crate::reader::Reader;
+
     use super::*;
 
     use color_eyre::Result;
-    use Object::{Bool, Char, Int, Nil, Pair, Symbol};
+    use Object::{Bool, Char, Int, Nil, Symbol};
 
-    #[test]
-    fn test_env() {
-        // Unbound identifier
-        let env = Env::new();
-        assert_eq!(env.find("foo"), None);
-
-        // Bound identifier
-        let env2 = env.bind("foo", -8);
-        assert_eq!(env2.find("foo"), Some(-8));
-        // Original doesn't change
-        assert_eq!(env.find("foo"), None);
-
-        // Two bound identifiers
-        let env3 = env2.bind("bar", -16);
-        assert_eq!(env3.find("foo"), Some(-8));
-        assert_eq!(env3.find("bar"), Some(-16));
-        // Original doesn't change
-        assert_eq!(env2.find("foo"), Some(-8));
-        assert_eq!(env2.find("bar"), None);
-
-        // Rebinding an identifier
-        let env4 = env2.bind("foo", -16);
-        assert_eq!(env4.find("foo"), Some(-16));
-        // Original doesn't change
-        assert_eq!(env2.find("foo"), Some(-8));
+    fn compile_expr(source: &str) -> ProgramBuffer {
+        let mut buffer = ProgramBuffer::new();
+        Compiler::new(&mut buffer).function(&Reader::from_str(source).read_expr().unwrap());
+        buffer
     }
 
     #[test]
     fn test_compile_positive_integer() -> Result<()> {
-        let mut buffer = ProgramBuffer::new();
-        Compiler::new(&mut buffer).function(&Int(1234));
-        // assert_eq!(
-        //     buffer.as_slice(),
-        //     // rex movabs rax $imm; ret
-        //     &[0x48, 0xb8, 210, 4, 0x00, 0x00, 0x01, 0x00, 0xf0, 0xff, 0xc3]
-        // );
-        unsafe {
-            assert_eq!(
-                Object::parse_word(buffer.make_executable().execute())?,
-                Int(1234)
-            );
-        }
+        let buffer = compile_expr("1234");
+        assert_eq!(
+            // Skip prelude and epilogue
+            &buffer.as_slice()[4..14],
+            // rex movabs rax $imm
+            &[0x48, 0xb8, 210, 4, 0x00, 0x00, 0x01, 0x00, 0xf0, 0xff]
+        );
+        assert_eq!(
+            Object::parse_word(unsafe { buffer.make_executable().execute() })?,
+            Int(1234)
+        );
         Ok(())
     }
 
     #[test]
     fn test_compile_negative_integer() -> Result<()> {
-        let mut buffer = ProgramBuffer::new();
-        Compiler::new(&mut buffer).function(&Int(-1234));
-        // assert_eq!(
-        //     buffer.as_slice(),
-        //     // rex mov rax $imm; ret
-        //     &[0x48, 0xb8, 0x2e, 0xfb, 0xff, 0xff, 0x01, 0x00, 0xf0, 0xff, 0xc3]
-        // );
-        unsafe {
-            assert_eq!(
-                Object::parse_word(buffer.make_executable().execute())?,
-                Int(-1234)
-            );
-        }
+        let buffer = compile_expr("-1234");
+        assert_eq!(
+            // Skip prelude and epilogue
+            &buffer.as_slice()[4..14],
+            // rex mov rax $imm
+            &[0x48, 0xb8, 0x2e, 0xfb, 0xff, 0xff, 0x01, 0x00, 0xf0, 0xff]
+        );
+        assert_eq!(
+            Object::parse_word(unsafe { buffer.make_executable().execute() })?,
+            Int(-1234)
+        );
         Ok(())
     }
 
     #[test]
     fn test_compile_char() -> Result<()> {
-        let mut buffer = ProgramBuffer::new();
-        Compiler::new(&mut buffer).function(&Char(b'x'));
-        // assert_eq!(
-        //     buffer.as_slice(),
-        //     // rex mov rax $imm; ret
-        //     &[0x48, 0xb8, b'x', 0x00, 0x00, 0x00, 0x02, 0x00, 0xf0, 0xff, 0xc3]
-        // );
-        unsafe {
-            assert_eq!(
-                Object::parse_word(buffer.make_executable().execute())?,
-                Char(b'x')
-            );
-        }
+        let buffer = compile_expr(r"#\x");
+        assert_eq!(
+            &buffer.as_slice()[4..14],
+            // rex mov rax $imm
+            &[0x48, 0xb8, b'x', 0x00, 0x00, 0x00, 0x02, 0x00, 0xf0, 0xff]
+        );
+        assert_eq!(
+            Object::parse_word(unsafe { buffer.make_executable().execute() })?,
+            Char(b'x')
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_compile_nil() -> Result<()> {
+        let buffer = compile_expr("()");
+        assert_eq!(
+            Object::parse_word(unsafe { buffer.make_executable().execute() })?,
+            Nil
+        );
         Ok(())
     }
 
@@ -323,27 +307,15 @@ mod tests {
         Compiler::new(&mut buffer).expr(&Symbol("x".to_owned()), -16, &Env::new().bind("x", -8));
         assert_eq!(
             buffer.as_slice(),
-            // rex movabs rax $imm; ret
+            // rex movabs rax $imm
             &[0x48, 0x8b, 0x45, 0xf8]
         );
         Ok(())
     }
 
-    fn unary_call(name: impl Into<String>, arg: Object) -> Object {
-        Pair(box Symbol(name.into()), box Pair(box arg, box Nil))
-    }
-
-    fn binary_call(name: impl Into<String>, arg0: Object, arg1: Object) -> Object {
-        Pair(
-            box Symbol(name.into()),
-            box Pair(box arg0, box Pair(box arg1, box Nil)),
-        )
-    }
-
     #[test]
     fn test_compile_add1() -> Result<()> {
-        let mut buffer = ProgramBuffer::new();
-        Compiler::new(&mut buffer).function(&unary_call("add1", Int(41)));
+        let buffer = compile_expr("(add1 41)");
         #[rustfmt::skip]
         assert_eq!(
             buffer.as_slice(),
@@ -358,32 +330,26 @@ mod tests {
                 0x48, 0x89, 0xEC, 0x5D, 0xc3,
             ]
         );
-        unsafe {
-            assert_eq!(
-                Object::parse_word(buffer.make_executable().execute())?,
-                Int(42)
-            );
-        }
+        assert_eq!(
+            Object::parse_word(unsafe { buffer.make_executable().execute() })?,
+            Int(42)
+        );
         Ok(())
     }
 
     #[test]
     fn test_compile_add1_nested() -> Result<()> {
-        let mut buffer = ProgramBuffer::new();
-        Compiler::new(&mut buffer).function(&unary_call("add1", unary_call("add1", Int(1232))));
-        unsafe {
-            assert_eq!(
-                Object::parse_word(buffer.make_executable().execute())?,
-                Int(1234)
-            );
-        }
+        let buffer = compile_expr("(add1 (add1 1232))");
+        assert_eq!(
+            Object::parse_word(unsafe { buffer.make_executable().execute() })?,
+            Int(1234)
+        );
         Ok(())
     }
 
     #[test]
     fn test_compile_sub1() -> Result<()> {
-        let mut buffer = ProgramBuffer::new();
-        Compiler::new(&mut buffer).function(&unary_call("sub1", Int(1235)));
+        let buffer = compile_expr("(sub1 1235)");
         #[rustfmt::skip]
         assert_eq!(
             buffer.as_slice(),
@@ -398,117 +364,80 @@ mod tests {
                 0x48, 0x89, 0xEC, 0x5D, 0xc3,
             ]
         );
-        unsafe {
-            assert_eq!(
-                Object::parse_word(buffer.make_executable().execute())?,
-                Int(1234)
-            );
-        }
+        assert_eq!(
+            Object::parse_word(unsafe { buffer.make_executable().execute() })?,
+            Int(1234)
+        );
         Ok(())
     }
 
     #[test]
     fn test_compile_is_int_true() -> Result<()> {
-        let mut buffer = ProgramBuffer::new();
-        Compiler::new(&mut buffer).function(&unary_call("int?", Int(10)));
-        unsafe {
-            assert_eq!(
-                Object::parse_word(buffer.make_executable().execute())?,
-                Bool(true)
-            );
-        }
+        let buffer = compile_expr("(int? 10)");
+        assert_eq!(
+            Object::parse_word(unsafe { buffer.make_executable().execute() })?,
+            Bool(true)
+        );
         Ok(())
     }
 
     #[test]
     fn test_compile_is_int_false() -> Result<()> {
-        let mut buffer = ProgramBuffer::new();
-        Compiler::new(&mut buffer).function(&unary_call("int?", Bool(true)));
-        unsafe {
-            assert_eq!(
-                Object::parse_word(buffer.make_executable().execute())?,
-                Bool(false)
-            );
-        }
+        let buffer = compile_expr("(int? #t)");
+        assert_eq!(
+            Object::parse_word(unsafe { buffer.make_executable().execute() })?,
+            Bool(false)
+        );
         Ok(())
     }
 
     #[test]
     fn test_compile_is_nil_true() -> Result<()> {
-        let mut buffer = ProgramBuffer::new();
-        Compiler::new(&mut buffer).function(&unary_call("nil?", Nil));
-        unsafe {
-            assert_eq!(
-                Object::parse_word(buffer.make_executable().execute())?,
-                Bool(true)
-            );
-        }
+        let buffer = compile_expr("(nil? ())");
+        assert_eq!(
+            Object::parse_word(unsafe { buffer.make_executable().execute() })?,
+            Bool(true)
+        );
         Ok(())
     }
 
     #[test]
     fn test_compile_is_nil_false() -> Result<()> {
-        let mut buffer = ProgramBuffer::new();
-        Compiler::new(&mut buffer).function(&unary_call("nil?", Int(1)));
-        unsafe {
-            assert_eq!(
-                Object::parse_word(buffer.make_executable().execute())?,
-                Bool(false)
-            );
-        }
+        let buffer = compile_expr("(nil? 1)");
+        assert_eq!(
+            Object::parse_word(unsafe { buffer.make_executable().execute() })?,
+            Bool(false)
+        );
         Ok(())
     }
 
     #[test]
     fn test_compile_plus() -> Result<()> {
-        let mut buffer = ProgramBuffer::new();
-        Compiler::new(&mut buffer).function(&binary_call("+", Int(1), Int(2)));
-        unsafe {
-            assert_eq!(
-                Object::parse_word(buffer.make_executable().execute())?,
-                Int(3)
-            );
-        }
+        let buffer = compile_expr("(+ 1 2)");
+        assert_eq!(
+            Object::parse_word(unsafe { buffer.make_executable().execute() })?,
+            Int(3)
+        );
         Ok(())
     }
 
     #[test]
     fn test_compile_plus_nested() -> Result<()> {
-        let mut buffer = ProgramBuffer::new();
-        Compiler::new(&mut buffer).function(&binary_call(
-            "+",
-            binary_call("+", Int(1), Int(2)),
-            binary_call("+", Int(3), Int(4)),
-        ));
-        unsafe {
-            assert_eq!(
-                Object::parse_word(buffer.make_executable().execute())?,
-                Int(10)
-            );
-        }
+        let buffer = compile_expr("(+ (+ 1 2) (+ 3 4))");
+        assert_eq!(
+            Object::parse_word(unsafe { buffer.make_executable().execute() })?,
+            Int(10)
+        );
         Ok(())
     }
 
     #[test]
     fn test_compile_let() -> Result<()> {
-        let mut buffer = ProgramBuffer::new();
-        Compiler::new(&mut buffer).function(&binary_call(
-            "let",
-            Pair(
-                box Pair(box Symbol("x".to_owned()), box Pair(box Int(10), box Nil)),
-                box Pair(
-                    box Pair(box Symbol("y".to_owned()), box Pair(box Int(4), box Nil)),
-                    box Nil,
-                ),
-            ),
-            binary_call("+", Symbol("x".to_owned()), Symbol("y".to_owned())),
-        ));
-        unsafe {
-            assert_eq!(
-                Object::parse_word(buffer.make_executable().execute())?,
-                Int(14)
-            );
-        }
+        let buffer = compile_expr("(let ((x 10) (y 4)) (+ x y))");
+        assert_eq!(
+            Object::parse_word(unsafe { buffer.make_executable().execute() })?,
+            Int(14)
+        );
         Ok(())
     }
 
@@ -516,76 +445,26 @@ mod tests {
     #[should_panic(expected = "unbound symbol 'x'")]
     fn test_compile_let_parallel_fails() {
         // TODO replace panic with result
-        let mut buffer = ProgramBuffer::new();
-        Compiler::new(&mut buffer).function(&binary_call(
-            "let",
-            Pair(
-                box Pair(box Symbol("x".to_owned()), box Pair(box Int(10), box Nil)),
-                box Pair(
-                    box Pair(
-                        box Symbol("y".to_owned()),
-                        box Pair(box Symbol("x".to_owned()), box Nil),
-                    ),
-                    box Nil,
-                ),
-            ),
-            binary_call("+", Symbol("x".to_owned()), Symbol("y".to_owned())),
-        ));
+        compile_expr("(let ((x 10) (y x)) (+ x y))");
     }
 
     #[test]
     fn test_compile_nested_let() -> Result<()> {
-        let mut buffer = ProgramBuffer::new();
-        let inner = binary_call(
-            "let",
-            Pair(
-                box Pair(box Symbol("y".to_owned()), box Pair(box Int(5), box Nil)),
-                box Nil,
-            ),
-            binary_call("+", Symbol("x".to_owned()), Symbol("y".to_owned())),
+        let buffer = compile_expr("(let ((x 1)) (let ((y 5)) (+ x y)))");
+        assert_eq!(
+            Object::parse_word(unsafe { buffer.make_executable().execute() })?,
+            Int(6)
         );
-        Compiler::new(&mut buffer).function(&binary_call(
-            "let",
-            Pair(
-                box Pair(box Symbol("x".to_owned()), box Pair(box Int(1), box Nil)),
-                box Nil,
-            ),
-            inner,
-        ));
-        unsafe {
-            assert_eq!(
-                Object::parse_word(buffer.make_executable().execute())?,
-                Int(6)
-            );
-        }
         Ok(())
     }
 
     #[test]
     fn test_compile_nested_let_shadowing() -> Result<()> {
-        let mut buffer = ProgramBuffer::new();
-        let inner = binary_call(
-            "let",
-            Pair(
-                box Pair(box Symbol("x".to_owned()), box Pair(box Int(5), box Nil)),
-                box Nil,
-            ),
-            binary_call("+", Symbol("x".to_owned()), Int(6)),
+        let buffer = compile_expr("(let ((x 1)) (let ((x 5)) (+ x 6)))");
+        assert_eq!(
+            Object::parse_word(unsafe { buffer.make_executable().execute() })?,
+            Int(11)
         );
-        Compiler::new(&mut buffer).function(&binary_call(
-            "let",
-            Pair(
-                box Pair(box Symbol("x".to_owned()), box Pair(box Int(1), box Nil)),
-                box Nil,
-            ),
-            inner,
-        ));
-        unsafe {
-            assert_eq!(
-                Object::parse_word(buffer.make_executable().execute())?,
-                Int(11)
-            );
-        }
         Ok(())
     }
 }

@@ -36,7 +36,6 @@ The project is split into several modules:
 
 ## To-Do
 
-- [ ] Simplify the compiler test code by using the reader
 - [ ] Refactor `panic`s into compiler errors
 - [ ] Conditional expressions
 - [ ] Heap allocations
