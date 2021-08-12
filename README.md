@@ -32,3 +32,13 @@ The project is split into several modules:
 - `src/program_buffer.rs` contains `ProgramBuffer`, a byte buffer with methods for emitting x86 assembly into it.  The buffer can be converted into an `ExecutableProgramBuffer`, which can be run as a function.
 - `src/compiler.rs` implements methods for compiling an AST using a `ProgramBuffer` as a backend.
 - `src/reader.rs` implements a reader that parses text into an AST.
+
+
+## To-Do
+
+- [ ] Simplify the compiler test code by using the reader
+- [ ] Refactor `panic`s into compiler errors
+- [ ] Conditional expressions
+- [ ] Heap allocations
+- [ ] Handle non-ASCII character literals
+- [ ] 
