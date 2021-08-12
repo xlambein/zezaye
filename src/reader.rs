@@ -59,23 +59,14 @@ impl<'a> Reader<'a> {
     pub fn read(&mut self) -> Result<Vec<Object>> {
         let mut exprs = vec![];
         while let Some(_) = self.peek() {
-            self.skip_whitespaces();
             exprs.push(self.read_expr()?);
+            self.skip_whitespaces();
         }
         Ok(exprs)
     }
 
-    fn read_list(&mut self) -> Result<Object> {
-        self.skip_whitespaces();
-        if self.try_peek()? == ')' {
-            self.next().unwrap();
-            return Ok(Object::Nil);
-        }
-        Ok(Object::Pair(box self.read_expr()?, box self.read_list()?))
-    }
-
     pub fn read_expr(&mut self) -> Result<Object> {
-        // We assume `c` isn't a whitespace
+        self.skip_whitespaces();
         let c = self.try_next()?;
 
         if c == '(' {
@@ -99,6 +90,15 @@ impl<'a> Reader<'a> {
             // TODO restrict characters
             self.read_symbol(c.to_string())
         }
+    }
+
+    fn read_list(&mut self) -> Result<Object> {
+        self.skip_whitespaces();
+        if self.try_peek()? == ')' {
+            self.next().unwrap();
+            return Ok(Object::Nil);
+        }
+        Ok(Object::Pair(box self.read_expr()?, box self.read_list()?))
     }
 
     fn read_number(&mut self, mut acc: String) -> Result<Object> {
@@ -175,7 +175,7 @@ mod test {
             Object::Symbol("a1234".to_owned())
         );
         assert_eq!(
-            Reader::from_str("-ish  ").read_expr()?,
+            Reader::from_str("  -ish  ").read_expr()?,
             Object::Symbol("-ish".to_owned())
         );
         assert_eq!(
@@ -194,7 +194,7 @@ mod test {
         // Successful
         assert_eq!(Reader::from_str("1234").read_expr()?, Object::Int(1234));
         assert_eq!(Reader::from_str("-12)").read_expr()?, Object::Int(-12));
-        assert_eq!(Reader::from_str("+500  ").read_expr()?, Object::Int(500));
+        assert_eq!(Reader::from_str("  +500  ").read_expr()?, Object::Int(500));
         assert_eq!(
             Reader::from_str("123.45").read_expr()?,
             Object::Float(123.45)
@@ -228,7 +228,7 @@ mod test {
     #[test]
     fn test_read_expr_bool() -> Result<()> {
         // Success
-        assert_eq!(Reader::from_str("#f ").read_expr()?, Object::Bool(false));
+        assert_eq!(Reader::from_str(" \n#f ").read_expr()?, Object::Bool(false));
         assert_eq!(Reader::from_str("#t)").read_expr()?, Object::Bool(true));
 
         // Failure

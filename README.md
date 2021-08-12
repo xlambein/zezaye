@@ -36,8 +36,7 @@ The project is split into several modules:
 
 ## To-Do
 
-- [ ] Refactor `panic`s into compiler errors
-- [ ] Conditional expressions
 - [ ] Heap allocations
 - [ ] Handle non-ASCII character literals
+- [ ] Refactor `panic`s into compiler errors
 - [ ] 

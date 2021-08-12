@@ -135,7 +135,7 @@ impl<'buffer> Compiler<'buffer> {
         new_env: Env,
     ) -> (Env, i64) {
         if let Pair(box Pair(box Symbol(ident), box Pair(box expr, box Nil)), bindings) = bindings {
-            // Eval expr and store it on stack
+            // Compile expr and store result on stack
             self.expr(expr, stack_index, env);
             self.buffer
                 .store_reg_indirect(Indirect(Register::Rbp, stack_index as i8), Register::Rax);
@@ -143,12 +143,60 @@ impl<'buffer> Compiler<'buffer> {
             // Store new binding
             let new_env = new_env.bind(ident, stack_index);
 
-            // Process rest
+            // Compile rest
             self.let_bindings(bindings, stack_index - WORD_SIZE, env, new_env)
         } else if let Nil = bindings {
             (new_env, stack_index)
         } else {
             panic!("malformed 'let' bindings");
+        }
+    }
+
+    fn cond(&mut self, args: &Object, stack_index: i64, env: &Env) {
+        if let Pair(box Pair(box cond, box Pair(box expr, box Nil)), box rest) = args {
+            if let Object::Bool(true) = cond {
+                // Small optimization: if one arm has a 'true' literal as a condition,
+                // we can safely skip the remaining
+                self.expr(expr, stack_index, env);
+            } else {
+                // TODO this whole nested compilation to avoid labels is complicated.
+                //  Using "smart" labels that patch the buffer a-posteriori, we might
+                //  make the code a bit simpler (and compilation faster).
+                //  However, we would lose the ability to use short (byte) jumps.
+
+                // Generate remaining arms of the cond
+                let mut rest_buf = ProgramBuffer::new();
+                Compiler::new(&mut rest_buf).cond(rest, stack_index, env);
+
+                // Generate body of the current arm
+                let mut body_buf = ProgramBuffer::new();
+                Compiler::new(&mut body_buf).expr(expr, stack_index, env);
+
+                // Add a jump over the other arms at the end of the body
+                body_buf.jmp(rest_buf.as_slice().len() as i32);
+
+                // Compile the condition
+                self.expr(cond, stack_index, env);
+
+                // Jump over the body if the condition is false
+                self.buffer
+                    .mov_reg_imm64(Register::Rdi, Object::Bool(false).to_word())
+                    .cmp_reg_reg(Register::Rax, Register::Rdi)
+                    .jcc(Setcc::Equal, body_buf.as_slice().len() as i32);
+
+                // Append body
+                self.buffer.concatenate(&body_buf);
+
+                // Append the other arms
+                self.buffer.concatenate(&rest_buf);
+            }
+        } else if let Nil = args {
+            // Produce Nil as a default result for the cond
+            // Not the best idea?  Might be better to enforce an `else`
+            self.buffer
+                .mov_reg_imm64(Register::Rax, Object::Nil.to_word());
+        } else {
+            panic!("malformed 'cond' expression");
         }
     }
 
@@ -161,6 +209,10 @@ impl<'buffer> Compiler<'buffer> {
             } else {
                 panic!("malformed 'let'");
             }
+            return;
+        } else if name == "cond" {
+            // (cond (expr expr)...)
+            self.cond(args, stack_index, env);
             return;
         }
 
@@ -464,6 +516,106 @@ mod tests {
         assert_eq!(
             Object::parse_word(unsafe { buffer.make_executable().execute() })?,
             Int(11)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_compile_cond_first() -> Result<()> {
+        let buffer = compile_expr(r"(cond (#t 1) (#f #\a))");
+        #[rustfmt::skip]
+        assert_eq!(
+            buffer.as_slice(),
+            &[
+                // Prologue
+                0x55, 0x48, 0x89, 0xE5,
+                // We entirely skip the conditional
+                // rex mov rax $repr(1)
+                0x48, 0xb8, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0xf0, 0xff,
+                // Epilogue
+                0x48, 0x89, 0xEC, 0x5D, 0xc3,
+            ]
+        );
+        assert_eq!(
+            Object::parse_word(unsafe { buffer.make_executable().execute() })?,
+            Int(1)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_compile_cond_second() -> Result<()> {
+        let buffer = compile_expr(r"(cond (#f 1) (#t #\a))");
+        #[rustfmt::skip]
+        assert_eq!(
+            buffer.as_slice(),
+            &[
+                // Prologue
+                0x55, 0x48, 0x89, 0xE5,
+
+                // First arm
+                // rex mov rax $repr(#f)
+                0x48, 0xb8, 0x00, 0x00, 0x00, 0x00, 0x03, 0x00, 0xf0, 0xff,
+                // rex mov rbi $repr(#f)
+                0x48, 0xbf, 0x00, 0x00, 0x00, 0x00, 0x03, 0x00, 0xf0, 0xff,
+                // rex cmp rax,rdi
+                0x48, 0x39, 0xf8,
+                // je +12 (jump over body)
+                0x74, 12,
+                // rex mov rax $repr(1)
+                0x48, 0xb8, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0xf0, 0xff,
+                // jmp +10 (jump over rest)
+                0xeb, 10,
+
+                // Second arm (skipped conditional)
+                // rex mov rax $repr(#\a)
+                0x48, 0xb8, b'a', 0x00, 0x00, 0x00, 0x02, 0x00, 0xf0, 0xff,
+
+                // Epilogue
+                0x48, 0x89, 0xEC, 0x5D, 0xc3,
+            ]
+        );
+        assert_eq!(
+            Object::parse_word(unsafe { buffer.make_executable().execute() })?,
+            Char(b'a')
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_compile_cond_default() -> Result<()> {
+        let buffer = compile_expr(r"(cond (#f 1) (#f #\a))");
+        assert_eq!(
+            Object::parse_word(unsafe { buffer.make_executable().execute() })?,
+            Nil
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_compile_cond_in_let() -> Result<()> {
+        #[rustfmt::skip]
+        let buffer = compile_expr(r"
+            (let ((x ()))
+             (cond
+              ((int? x) 1)
+              ((nil? x) 2)
+              (#t 3)))
+        ");
+        assert_eq!(
+            Object::parse_word(unsafe { buffer.make_executable().execute() })?,
+            Int(2)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_compile_cond_not_bool() -> Result<()> {
+        #[rustfmt::skip]
+        let buffer = compile_expr(r"(cond ((+ 1 2) 1) (#t 2))");
+        assert_eq!(
+            Object::parse_word(unsafe { buffer.make_executable().execute() })?,
+            Int(1)
         );
         Ok(())
     }

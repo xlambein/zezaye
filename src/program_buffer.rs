@@ -128,6 +128,11 @@ impl ProgramBuffer {
         self
     }
 
+    pub fn concatenate(&mut self, other: &ProgramBuffer) -> &mut Self {
+        self.buf.extend(other.buf.as_slice());
+        self
+    }
+
     pub fn mov_reg_imm32(&mut self, dst: Register, src: i32) -> &mut Self {
         self.byte(REX_PREFIX)
             .byte(0xc7)
@@ -173,6 +178,12 @@ impl ProgramBuffer {
         self.u32(src)
     }
 
+    pub fn cmp_reg_reg(&mut self, dst: Register, src: Register) -> &mut Self {
+        self.byte(REX_PREFIX)
+            .byte(0x39)
+            .byte(0xc0 + dst as u8 + (src as u8) * 8)
+    }
+
     pub fn setcc_imm8(&mut self, cond: Setcc, dst: ByteRegister) -> &mut Self {
         // TODO check for overflow
         self.byte(0x0f)
@@ -204,6 +215,24 @@ impl ProgramBuffer {
 
     pub fn store_reg_reg_32(&mut self, dst: Register, src: Register) -> &mut Self {
         self.byte(0x89).byte(0xc0 + (src as u8) * 8 + dst as u8)
+    }
+
+    pub fn jmp(&mut self, distance: i32) -> &mut Self {
+        if distance >= -128 && distance <= 127 {
+            // Short jump
+            self.byte(0xeb).byte(distance as i8 as u8)
+        } else {
+            self.byte(0xe9).i32(distance)
+        }
+    }
+
+    pub fn jcc(&mut self, cond: Setcc, distance: i32) -> &mut Self {
+        if distance >= -128 && distance <= 127 {
+            // Short jump
+            self.byte(0x70 + cond as u8).byte(distance as i8 as u8)
+        } else {
+            self.byte(0x0f).byte(0x80 + cond as u8).i32(distance)
+        }
     }
 
     pub fn ret(&mut self) -> &mut Self {
