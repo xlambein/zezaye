@@ -83,6 +83,13 @@ mod env {
 
 use env::Env;
 
+#[repr(u32)]
+#[non_exhaustive]
+enum Syscall {
+    Read = 0,
+    Write = 1,
+}
+
 const WORD_SIZE: i64 = 8;
 
 pub struct Compiler<'buffer> {
@@ -284,6 +291,32 @@ impl<'buffer> Compiler<'buffer> {
                 self.buffer
                     .store_indirect_reg(Register::Rax, Indirect(Register::Rax, WORD_SIZE as i8));
             }
+            "putchar" => {
+                self.buffer
+                    // Save RSI
+                    .store_reg_indirect(Indirect(Register::Rbp, stack_index as i8), Register::Rsi)
+                    // Store word to write on stack
+                    .store_reg_indirect(
+                        Indirect(Register::Rbp, (stack_index - WORD_SIZE) as i8),
+                        Register::Rax,
+                    )
+                    // Syscall number: write
+                    .mov_reg_imm32(Register::Rax, Syscall::Write as i32)
+                    // Return address: we don't care
+                    .mov_reg_imm32(Register::Rcx, 0)
+                    // Arg 0: stdout
+                    .mov_reg_imm64(Register::Rdi, 1)
+                    // Arg 1: address of the word on the stack
+                    .store_reg_reg(Register::Rsi, Register::Rbp)
+                    .add_reg_imm32(Register::Rsi, (stack_index - WORD_SIZE) as i32)
+                    // Arg 2: length of the data (a single byte)
+                    .mov_reg_imm32(Register::Rdx, 1)
+                    .syscall()
+                    // Restore RSI
+                    .store_indirect_reg(Register::Rsi, Indirect(Register::Rbp, stack_index as i8))
+                    // Return nil
+                    .mov_reg_imm64(Register::Rax, Object::Nil.to_word());
+            }
             _ => {
                 panic!("undefined function '{}'", name);
             }
@@ -324,14 +357,14 @@ impl<'buffer> Compiler<'buffer> {
 
 #[cfg(test)]
 mod tests {
-    use std::convert::TryInto;
-
-    use crate::reader::Reader;
-
-    use super::*;
+    use std::{convert::TryInto, io::Read};
 
     use color_eyre::Result;
-    use Object::{Bool, Char, Int, Nil, Symbol};
+    use gag::BufferRedirect;
+
+    use super::*;
+    use crate::object::Object::{Bool, Char, Int, Nil, Symbol};
+    use crate::reader::Reader;
 
     fn compile_expr(source: &str) -> ProgramBuffer {
         let mut buffer = ProgramBuffer::new();
@@ -735,11 +768,25 @@ mod tests {
     #[test]
     fn test_compile_car_cdr() -> Result<()> {
         let buffer = compile_expr(r"(car (cdr (cons 123 (cons 456 ()))))");
-        let mut heap = [0; 2 * WORD_SIZE as usize];
+        let mut heap = [0; 4 * WORD_SIZE as usize];
         assert_eq!(
             Object::parse_word(unsafe { buffer.make_executable().execute(&mut heap) })?,
             Int(456)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn test_compile_putchar() -> Result<()> {
+        let buffer = compile_expr(r"(putchar #\x)");
+        let mut redirect = BufferRedirect::stdout().unwrap();
+        assert_eq!(
+            Object::parse_word(unsafe { buffer.make_executable().execute(&mut []) })?,
+            Nil
+        );
+        let mut output = String::new();
+        redirect.read_to_string(&mut output).unwrap();
+        assert_eq!(output, "x");
         Ok(())
     }
 }

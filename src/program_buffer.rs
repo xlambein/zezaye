@@ -254,6 +254,10 @@ impl ProgramBuffer {
         }
     }
 
+    pub fn syscall(&mut self) -> &mut Self {
+        self.byte(0x0f).byte(0x05)
+    }
+
     pub fn ret(&mut self) -> &mut Self {
         self.byte(0xc3)
     }
