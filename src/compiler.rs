@@ -221,6 +221,16 @@ impl<'buffer> Compiler<'buffer> {
             // (cond (expr expr)...)
             self.cond(args, stack_index, env);
             return;
+        } else if name == "println" {
+            // TODO this should be a macro in the future
+            self.call("print", args, stack_index, env);
+            self.call(
+                "putchar",
+                &Pair(box Object::Char(b'\n'), box Nil),
+                stack_index,
+                env,
+            );
+            return;
         }
 
         // TODO check arity before making call
@@ -317,6 +327,59 @@ impl<'buffer> Compiler<'buffer> {
                     // Return nil
                     .mov_reg_imm64(Register::Rax, Object::Nil.to_word());
             }
+            "string-length" => {
+                self.buffer
+                    // Mask away the header
+                    .mov_reg_imm64(Register::Rdi, PAYLOAD_MASK)
+                    .and_reg_reg(Register::Rax, Register::Rdi)
+                    // Fetch the contents of [RAX]
+                    .store_indirect_reg(Register::Rax, Indirect(Register::Rax, 0))
+                    // Add the Int header
+                    .mov_reg_imm64(Register::Rdi, Object::Int(0).to_word())
+                    .or_reg_reg(Register::Rax, Register::Rdi);
+            }
+            "string-ref" => {
+                self.buffer
+                    // Retrieve the offset (second arg) without the int header
+                    .store_indirect_reg32(Register::Rdi, Indirect(Register::Rbp, stack_index as i8))
+                    // Add the byte offset (second arg) to the address
+                    // TODO this could be done instead with [Rax+Rdi+8] addressing
+                    .add_reg_reg(Register::Rax, Register::Rdi)
+                    // Mask away the header
+                    .mov_reg_imm64(Register::Rdi, PAYLOAD_MASK)
+                    .and_reg_reg(Register::Rax, Register::Rdi)
+                    // Fetch the contents of [RAX+8] into the low byte of RAX
+                    .store_indirect_reg8(ByteRegister::Al, Indirect(Register::Rax, WORD_SIZE as i8))
+                    .and_reg_imm32(Register::Rax, 0xff)
+                    // Add the Char header
+                    .mov_reg_imm64(Register::Rdi, Object::Char(0).to_word())
+                    .or_reg_reg(Register::Rax, Register::Rdi);
+            }
+            "print" => {
+                self.buffer
+                    // Save RSI
+                    .store_reg_indirect(Indirect(Register::Rbp, stack_index as i8), Register::Rsi)
+                    // Mask away the header
+                    .mov_reg_imm64(Register::Rdi, PAYLOAD_MASK)
+                    .and_reg_reg(Register::Rax, Register::Rdi)
+                    // Arg 0: stdout
+                    .mov_reg_imm64(Register::Rdi, 1)
+                    // Arg 1: address of the word on the stack
+                    .store_reg_reg(Register::Rsi, Register::Rax)
+                    .add_reg_imm32(Register::Rsi, WORD_SIZE as i32)
+                    // Arg 2: length of the data
+                    .store_indirect_reg(Register::Rdx, Indirect(Register::Rax, 0))
+                    .store_reg_reg_32(Register::Rdx, Register::Rdx)
+                    // Syscall number: write
+                    .mov_reg_imm32(Register::Rax, Syscall::Write as i32)
+                    // Return address: we don't care
+                    .mov_reg_imm32(Register::Rcx, 0)
+                    .syscall()
+                    // Restore RSI
+                    .store_indirect_reg(Register::Rsi, Indirect(Register::Rbp, stack_index as i8))
+                    // Return nil
+                    .mov_reg_imm64(Register::Rax, Object::Nil.to_word());
+            }
             _ => {
                 panic!("undefined function '{}'", name);
             }
@@ -340,6 +403,29 @@ impl<'buffer> Compiler<'buffer> {
                 } else {
                     panic!("unbound symbol '{}'", s);
                 }
+            }
+            Object::String(s) => {
+                // length
+                self.buffer
+                    .store_indirect_imm32(Indirect(Register::Rsi, 0), s.len() as i32);
+                // characters
+                for (i, b) in s.as_bytes().iter().enumerate() {
+                    self.buffer.store_indirect_imm8(
+                        Indirect(Register::Rsi, WORD_SIZE as i8 + i as i8),
+                        *b,
+                    );
+                }
+                // Return string
+                // TODO this is not a smart way to get the String header
+                self.buffer
+                    .mov_reg_imm64(Register::Rax, Object::String("".to_owned()).to_word())
+                    .add_reg_reg(Register::Rax, Register::Rsi);
+
+                // Bump RSI (word-aligned)
+                self.buffer.add_reg_imm32(
+                    Register::Rsi,
+                    ((1 + s.len() as i64 / WORD_SIZE) * WORD_SIZE) as i32,
+                );
             }
             _ => {
                 self.buffer.mov_reg_imm64(Register::Rax, obj.to_word());
@@ -787,6 +873,66 @@ mod tests {
         let mut output = String::new();
         redirect.read_to_string(&mut output).unwrap();
         assert_eq!(output, "x");
+        Ok(())
+    }
+
+    #[test]
+    fn test_compile_string() -> Result<()> {
+        const STR: &str = "hi beautiful ✨";
+        let buffer = compile_expr(&format!(r#""{}""#, STR));
+        let mut heap = [0; 10 * WORD_SIZE as usize];
+        assert_eq!(
+            Object::parse_word(unsafe { buffer.make_executable().execute(&mut heap) })?,
+            Object::String("".to_owned())
+        );
+        assert_eq!(
+            usize::from_le_bytes(heap[..WORD_SIZE as usize].try_into().unwrap()),
+            STR.len()
+        );
+        assert_eq!(
+            &heap[WORD_SIZE as usize..WORD_SIZE as usize + STR.len()],
+            STR.as_bytes()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_compile_string_length() -> Result<()> {
+        const STR: &str = "hi beautiful ✨";
+        let buffer = compile_expr(&format!(r#"(string-length "{}")"#, STR));
+        let mut heap = [0; 10 * WORD_SIZE as usize];
+        assert_eq!(
+            Object::parse_word(unsafe { buffer.make_executable().execute(&mut heap) })?,
+            Object::Int(STR.len() as i32)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_compile_string_ref() -> Result<()> {
+        const STR: &str = "hi beautiful ✨";
+        let buffer = compile_expr(&format!(r#"(string-ref "{}" 4)"#, STR));
+        let mut heap = [0; 10 * WORD_SIZE as usize];
+        assert_eq!(
+            Object::parse_word(unsafe { buffer.make_executable().execute(&mut heap) })?,
+            Object::Char(b'e')
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_compile_print() -> Result<()> {
+        const STR: &str = "hi beautiful ✨";
+        let buffer = compile_expr(&format!(r#"(print "{}")"#, STR));
+        let mut heap = [0; 10 * WORD_SIZE as usize];
+        let mut redirect = BufferRedirect::stdout().unwrap();
+        assert_eq!(
+            Object::parse_word(unsafe { buffer.make_executable().execute(&mut heap) })?,
+            Nil
+        );
+        let mut output = String::new();
+        redirect.read_to_string(&mut output).unwrap();
+        assert_eq!(output, STR);
         Ok(())
     }
 }

@@ -106,6 +106,7 @@ pub enum Object {
     Nil,
     Pair(Box<Object>, Box<Object>),
     Symbol(String),
+    String(String),
 }
 
 const HEADER: RangeFrom<usize> = 51..;
@@ -144,9 +145,10 @@ impl Object {
             Object::Nil => SNAN_HEADER
                 .with_bits(TAG, Tag::Immediate as u64)
                 .with_bits(IMM_TAG, ImmTag::Nil as u64),
-            // TODO change this
+            // TODO change these
             Object::Pair(_, _) => SNAN_HEADER.with_bits(TAG, Tag::Pair as u64),
             Object::Symbol(_) => todo!(),
+            Object::String(_) => SNAN_HEADER.with_bits(TAG, Tag::String as u64),
         }
     }
 
@@ -164,10 +166,10 @@ impl Object {
                     ImmTag::Bool => Ok(Object::Bool(payload.bit(0))),
                     ImmTag::Nil => Ok(Object::Nil),
                 },
-                // TODO change this too
+                // TODO change these too
                 Tag::Pair => Ok(Object::Pair(box Object::Nil, box Object::Nil)),
                 Tag::Vector => todo!(),
-                Tag::String => todo!(),
+                Tag::String => Ok(Object::String("".to_owned())),
                 Tag::Symbol => todo!(),
                 Tag::Closure => todo!(),
             }

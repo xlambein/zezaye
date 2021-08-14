@@ -13,10 +13,12 @@ pub enum ReaderError {
     ParseIntError(#[from] num::ParseIntError),
     #[error("float parsing error")]
     ParseFloatError(#[from] num::ParseFloatError),
-    #[error("undefined hash literal #{0}")]
+    #[error("undefined hash literal '#{0}'")]
     ParseHashLiteralError(String),
-    #[error(r"unsupported character literal #\{0}")]
+    #[error(r"unsupported character literal '#\{0}'")]
     UnsupportedCharacterLiteral(char),
+    #[error(r"unknown escape character '\{0}'")]
+    UnknownEscapeCharacter(char),
 }
 
 type Result<T> = std::result::Result<T, ReaderError>;
@@ -86,6 +88,8 @@ impl<'a> Reader<'a> {
             } else {
                 self.read_hash_literal()
             }
+        } else if c == '"' {
+            self.read_string()
         } else {
             // TODO restrict characters
             self.read_symbol(c.to_string())
@@ -157,6 +161,26 @@ impl<'a> Reader<'a> {
             "t" => Ok(Object::Bool(true)),
             _ => Err(ReaderError::ParseHashLiteralError(acc)),
         }
+    }
+
+    fn read_string(&mut self) -> Result<Object> {
+        let mut acc = String::new();
+        loop {
+            let c = self.try_next()?;
+            if c == '"' {
+                break;
+            } else if c == '\\' {
+                acc.push(match self.try_next()? {
+                    '\\' => '\\',
+                    '"' => '"',
+                    'n' => '\n',
+                    other @ _ => return Err(ReaderError::UnknownEscapeCharacter(other)),
+                });
+            } else {
+                acc.push(c);
+            }
+        }
+        Ok(Object::String(acc))
     }
 }
 
@@ -255,6 +279,34 @@ mod test {
         assert_eq!(
             Reader::from_str(r"#\🙄").read_expr(),
             Err(ReaderError::UnsupportedCharacterLiteral('🙄'))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_read_expr_string() -> Result<()> {
+        // Success
+        assert_eq!(
+            Reader::from_str(r#" "hello"  "#).read_expr()?,
+            Object::String("hello".to_owned())
+        );
+        assert_eq!(
+            Reader::from_str(r#" "\\escape\"characters\n"  "#).read_expr()?,
+            Object::String("\\escape\"characters\n".to_owned())
+        );
+        assert_eq!(
+            Reader::from_str(r#""リスプ🙄""#).read_expr()?,
+            Object::String("リスプ🙄".to_owned())
+        );
+
+        // Failure
+        assert_eq!(
+            Reader::from_str(r#""no matching \""#).read_expr(),
+            Err(ReaderError::UnexpectedEoi)
+        );
+        assert_eq!(
+            Reader::from_str(r#""unknown \escape""#).read_expr(),
+            Err(ReaderError::UnknownEscapeCharacter('e'))
         );
         Ok(())
     }

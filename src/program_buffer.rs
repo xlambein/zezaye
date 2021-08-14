@@ -100,6 +100,22 @@ pub enum Setcc {
 
 pub struct Indirect(pub Register, pub i8);
 
+#[repr(u8)]
+enum Mod {
+    /// Register indirect addressing mode
+    Indirect = 0b00,
+    /// One-byte signed displacement follows addressing mode byte(s)
+    IndirectOneByteDisplacement = 0b01,
+    /// Four-byte signed displacement follows addressing mode byte(s)
+    IndirectFourByteDisplacement = 0b10,
+    /// Register addressing mode
+    Direct = 0b11,
+}
+
+const fn modrm(m: Mod, reg: u8, rm: u8) -> u8 {
+    ((m as u8) << 6) | (reg << 3) | rm
+}
+
 const REX_PREFIX: u8 = 0x48;
 
 impl ProgramBuffer {
@@ -181,6 +197,18 @@ impl ProgramBuffer {
             .byte(0xc0 + (src as u8) * 8 + dst as u8)
     }
 
+    pub fn and_reg_imm32(&mut self, dst: Register, src: u32) -> &mut Self {
+        self.byte(0x81)
+            .byte(modrm(Mod::Direct, /* /4 */ 4, dst as u8))
+            .u32(src)
+    }
+
+    pub fn or_reg_reg(&mut self, dst: Register, src: Register) -> &mut Self {
+        self.byte(REX_PREFIX)
+            .byte(0x09)
+            .byte(0xc0 + (src as u8) * 8 + dst as u8)
+    }
+
     pub fn cmp_reg_imm32(&mut self, dst: Register, src: u32) -> &mut Self {
         if let Register::Rax = dst {
             // Eax optimization
@@ -224,6 +252,46 @@ impl ProgramBuffer {
             .byte(0x8b)
             .byte(0x40 + (dst as u8) * 8 + src.0 as u8)
             .byte(src.1 as u8)
+    }
+
+    pub fn store_indirect_reg8(&mut self, dst: ByteRegister, src: Indirect) -> &mut Self {
+        self.byte(0x8a)
+            .byte(modrm(
+                Mod::IndirectOneByteDisplacement,
+                dst as u8,
+                src.0 as u8,
+            ))
+            .byte(src.1 as u8)
+    }
+
+    pub fn store_indirect_reg32(&mut self, dst: Register, src: Indirect) -> &mut Self {
+        self.byte(0x8b)
+            .byte(0x40 + (dst as u8) * 8 + src.0 as u8)
+            .byte(src.1 as u8)
+    }
+
+    pub fn store_indirect_imm8(&mut self, dst: Indirect, src: u8) -> &mut Self {
+        self.byte(REX_PREFIX)
+            .byte(0xc6)
+            .byte(modrm(
+                Mod::IndirectOneByteDisplacement,
+                /* /0 */ 0,
+                dst.0 as u8,
+            ))
+            .byte(dst.1 as u8)
+            .byte(src)
+    }
+
+    pub fn store_indirect_imm32(&mut self, dst: Indirect, src: i32) -> &mut Self {
+        self.byte(REX_PREFIX)
+            .byte(0xc7)
+            .byte(modrm(
+                Mod::IndirectOneByteDisplacement,
+                /* /0 */ 0,
+                dst.0 as u8,
+            ))
+            .byte(dst.1 as u8)
+            .i32(src)
     }
 
     pub fn store_reg_reg_32(&mut self, dst: Register, src: Register) -> &mut Self {
@@ -344,5 +412,12 @@ mod tests {
         let mut buffer = ProgramBuffer::new();
         buffer.store_reg_indirect(Indirect(Register::Rax, 16), Register::Rbx);
         assert_eq!(buffer.as_slice(), &[0x48, 0x89, 0x58, 0x10]);
+    }
+
+    #[test]
+    fn test() {
+        let mut buffer = ProgramBuffer::new();
+        buffer.store_indirect_imm32(Indirect(Register::Rsi, -8), 0x12);
+        println!("{}", buffer);
     }
 }

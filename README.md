@@ -36,7 +36,7 @@ The project is split into several modules:
 
 ## To-Do
 
-- [ ] Vectors & strings
-- [ ] Handle non-ASCII character literals
+- [ ] Vectors
+- [ ] Handle non-ASCII character literals (make Char a Unicode scalar value)
 - [ ] Refactor `panic`s into compiler errors
 - [ ] 
