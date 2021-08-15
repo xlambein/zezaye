@@ -1,7 +1,8 @@
 use Object::{Bool, Char, Int, Nil, Pair, Symbol};
+use Register::*;
 
 use crate::object::{Object, PAYLOAD_MASK};
-use crate::program_buffer::{ByteRegister, Indirect, ProgramBuffer, Register, Setcc};
+use crate::program_buffer::{Cond, Immediate32, Ind, ProgramBuffer, Register};
 
 mod env {
     use std::rc::Rc;
@@ -9,14 +10,14 @@ mod env {
     enum EnvItem {
         Binding {
             ident: String,
-            location: i64,
+            location: i32,
             prev: Rc<EnvItem>,
         },
         Nothing,
     }
 
     impl EnvItem {
-        fn find(&self, name: &str) -> Option<i64> {
+        fn find(&self, name: &str) -> Option<i32> {
             match self {
                 EnvItem::Binding {
                     ident, location, ..
@@ -35,7 +36,7 @@ mod env {
             Env(Rc::new(EnvItem::Nothing))
         }
 
-        pub fn bind(&self, ident: impl Into<String>, location: i64) -> Self {
+        pub fn bind(&self, ident: impl Into<String>, location: i32) -> Self {
             Env(Rc::new(EnvItem::Binding {
                 ident: ident.into(),
                 location,
@@ -43,7 +44,7 @@ mod env {
             }))
         }
 
-        pub fn find(&self, name: &str) -> Option<i64> {
+        pub fn find(&self, name: &str) -> Option<i32> {
             self.0.find(name)
         }
     }
@@ -90,7 +91,13 @@ enum Syscall {
     Write = 1,
 }
 
-const WORD_SIZE: i64 = 8;
+impl Immediate32 for Syscall {
+    fn to_le_bytes(self) -> [u8; 4] {
+        (self as u32).to_le_bytes()
+    }
+}
+
+const WORD_SIZE: usize = 8;
 
 pub struct Compiler<'buffer> {
     buffer: &'buffer mut ProgramBuffer,
@@ -103,13 +110,16 @@ impl<'buffer> Compiler<'buffer> {
 
     fn compare_imm_header(&mut self, target: Object) {
         self.buffer
-            .shr_reg_imm8(Register::Rax, 32)
-            .cmp_reg_imm32(Register::Rax, (target.to_word() >> 32) as u32)
-            .mov_reg_imm64(Register::Rax, Bool(false).to_word())
-            .setcc_imm8(Setcc::Equal, ByteRegister::Al);
+            // Compare the header
+            .shr_q_imm(AX, 32i8)
+            .cmp_d_imm(AX, (target.to_word() >> 32) as u32)
+            // Set Bool header
+            .mov_q_imm64(AX, Bool(false).to_word())
+            // Set the lower bit of AX if the CMP produced equality
+            .setcc(Cond::Equal, AX);
     }
 
-    fn args(&mut self, args: &Object, stack_index: i64, env: &Env) -> i64 {
+    fn args(&mut self, args: &Object, stack_index: i32, env: &Env) -> i32 {
         if let Pair(box car, box cdr) = args {
             match cdr {
                 Nil => {
@@ -118,12 +128,9 @@ impl<'buffer> Compiler<'buffer> {
                 }
                 Pair(_, _) => {
                     let stack_index = self.args(cdr, stack_index, env);
-                    self.buffer.store_reg_indirect(
-                        Indirect(Register::Rbp, stack_index as i8),
-                        Register::Rax,
-                    );
+                    self.buffer.mov_q(Ind(BP, stack_index), AX);
                     // TODO handle stack index bigger than a byte
-                    let stack_index = stack_index - WORD_SIZE;
+                    let stack_index = stack_index - WORD_SIZE as i32;
                     self.expr(car, stack_index, env);
                     stack_index
                 }
@@ -137,21 +144,20 @@ impl<'buffer> Compiler<'buffer> {
     fn let_bindings(
         &mut self,
         bindings: &Object,
-        stack_index: i64,
+        stack_index: i32,
         env: &Env,
         new_env: Env,
-    ) -> (Env, i64) {
+    ) -> (Env, i32) {
         if let Pair(box Pair(box Symbol(ident), box Pair(box expr, box Nil)), bindings) = bindings {
             // Compile expr and store result on stack
             self.expr(expr, stack_index, env);
-            self.buffer
-                .store_reg_indirect(Indirect(Register::Rbp, stack_index as i8), Register::Rax);
+            self.buffer.mov_q(Ind(BP, stack_index), AX);
 
             // Store new binding
             let new_env = new_env.bind(ident, stack_index);
 
             // Compile rest
-            self.let_bindings(bindings, stack_index - WORD_SIZE, env, new_env)
+            self.let_bindings(bindings, stack_index - WORD_SIZE as i32, env, new_env)
         } else if let Nil = bindings {
             (new_env, stack_index)
         } else {
@@ -159,7 +165,7 @@ impl<'buffer> Compiler<'buffer> {
         }
     }
 
-    fn cond(&mut self, args: &Object, stack_index: i64, env: &Env) {
+    fn cond(&mut self, args: &Object, stack_index: i32, env: &Env) {
         if let Pair(box Pair(box cond, box Pair(box expr, box Nil)), box rest) = args {
             if let Object::Bool(true) = cond {
                 // Small optimization: if one arm has a 'true' literal as a condition,
@@ -180,16 +186,16 @@ impl<'buffer> Compiler<'buffer> {
                 Compiler::new(&mut body_buf).expr(expr, stack_index, env);
 
                 // Add a jump over the other arms at the end of the body
-                body_buf.jmp(rest_buf.as_slice().len() as i32);
+                body_buf.jmp_rel(rest_buf.as_slice().len() as i32);
 
                 // Compile the condition
                 self.expr(cond, stack_index, env);
 
                 // Jump over the body if the condition is false
                 self.buffer
-                    .mov_reg_imm64(Register::Rdi, Object::Bool(false).to_word())
-                    .cmp_reg_reg(Register::Rax, Register::Rdi)
-                    .jcc(Setcc::Equal, body_buf.as_slice().len() as i32);
+                    .mov_q_imm64(DI, Object::Bool(false).to_word())
+                    .cmp_q(AX, DI)
+                    .jcc(Cond::Equal, body_buf.as_slice().len() as i32);
 
                 // Append body
                 self.buffer.concatenate(&body_buf);
@@ -200,14 +206,13 @@ impl<'buffer> Compiler<'buffer> {
         } else if let Nil = args {
             // Produce Nil as a default result for the cond
             // Not the best idea?  Might be better to enforce an `else`
-            self.buffer
-                .mov_reg_imm64(Register::Rax, Object::Nil.to_word());
+            self.buffer.mov_q_imm64(AX, Object::Nil.to_word());
         } else {
             panic!("malformed 'cond' expression");
         }
     }
 
-    fn call(&mut self, name: &str, args: &Object, stack_index: i64, env: &Env) {
+    fn call(&mut self, name: &str, args: &Object, stack_index: i32, env: &Env) {
         if name == "let" {
             // (let ((ident expr)...) expr)
             if let Pair(box bindings, box Pair(box expr, box Nil)) = args {
@@ -237,10 +242,10 @@ impl<'buffer> Compiler<'buffer> {
         self.args(args, stack_index, env);
         match name {
             "add1" => {
-                self.buffer.add_reg_imm32(Register::Rax, 1);
+                self.buffer.add_q_imm(AX, 1);
             }
             "sub1" => {
-                self.buffer.sub_reg_imm32(Register::Rax, 1);
+                self.buffer.sub_q_imm(AX, 1);
             }
             "int?" => {
                 self.compare_imm_header(Int(0));
@@ -256,129 +261,118 @@ impl<'buffer> Compiler<'buffer> {
             }
             "+" => {
                 // TODO type checking
-                // Erase the upper bits of RAX
-                self.buffer.store_reg_reg_32(Register::Rax, Register::Rax);
-                // Add RAX to the second arg
                 self.buffer
-                    .add_reg_indirect(Register::Rax, Indirect(Register::Rbp, stack_index as i8));
+                    // Erase the upper bits of RAX
+                    .mov_d(AX, AX)
+                    // Add RAX to the second arg
+                    .add_q(AX, Ind(BP, stack_index));
             }
             "cons" => {
                 // TODO this could be optimized if we didn't pre-process the arguments
-                // car
                 self.buffer
-                    .store_reg_indirect(Indirect(Register::Rsi, 0), Register::Rax);
-                // cdr
-                self.buffer
-                    .store_indirect_reg(Register::Rax, Indirect(Register::Rbp, stack_index as i8));
-                self.buffer
-                    .store_reg_indirect(Indirect(Register::Rsi, WORD_SIZE as i8), Register::Rax);
-                // Return cons cell
-                // TODO this is not a smart way to get the Pair header :D
-                self.buffer
-                    .mov_reg_imm64(Register::Rax, Object::Pair(box Nil, box Nil).to_word())
-                    .add_reg_reg(Register::Rax, Register::Rsi);
-                // Bump RSI
-                self.buffer
-                    .add_reg_imm32(Register::Rsi, 2 * WORD_SIZE as i32);
+                    // car
+                    .mov_q(Ind(SI, 0), AX)
+                    // cdr
+                    .mov_q(AX, Ind(BP, stack_index))
+                    .mov_q(Ind(SI, WORD_SIZE as i32), AX)
+                    // Return cons cell
+                    // TODO this is not a smart way to get the Pair header :D
+                    .mov_q_imm64(AX, Object::Pair(box Nil, box Nil).to_word())
+                    .add_q(AX, SI)
+                    // Bump RSI
+                    .add_q_imm(SI, 2 * WORD_SIZE as i32);
             }
             "car" => {
                 // TODO type check
-                // Mask away the header
                 self.buffer
-                    .mov_reg_imm64(Register::Rdi, PAYLOAD_MASK)
-                    .and_reg_reg(Register::Rax, Register::Rdi);
-                // Return the address in RAX
-                self.buffer
-                    .store_indirect_reg(Register::Rax, Indirect(Register::Rax, 0));
+                    // Mask away the header
+                    .mov_q_imm64(DI, PAYLOAD_MASK)
+                    .and_q(AX, DI)
+                    // Return the address in RAX
+                    .mov_q(AX, Ind(AX, 0));
             }
             "cdr" => {
                 // TODO type check
-                // Mask away the header
                 self.buffer
-                    .mov_reg_imm64(Register::Rdi, PAYLOAD_MASK)
-                    .and_reg_reg(Register::Rax, Register::Rdi);
-                // Return the address in RAX+8
-                self.buffer
-                    .store_indirect_reg(Register::Rax, Indirect(Register::Rax, WORD_SIZE as i8));
+                    // Mask away the header
+                    .mov_q_imm64(DI, PAYLOAD_MASK)
+                    .and_q(AX, DI)
+                    // Return the address in RAX+8
+                    .mov_q(AX, Ind(AX, WORD_SIZE as i32));
             }
             "putchar" => {
                 self.buffer
                     // Save RSI
-                    .store_reg_indirect(Indirect(Register::Rbp, stack_index as i8), Register::Rsi)
+                    .mov_q(Ind(BP, stack_index), SI)
                     // Store word to write on stack
-                    .store_reg_indirect(
-                        Indirect(Register::Rbp, (stack_index - WORD_SIZE) as i8),
-                        Register::Rax,
-                    )
+                    .mov_q(Ind(BP, stack_index - WORD_SIZE as i32), AX)
                     // Syscall number: write
-                    .mov_reg_imm32(Register::Rax, Syscall::Write as i32)
+                    .mov_q_imm(AX, Syscall::Write)
                     // Return address: we don't care
-                    .mov_reg_imm32(Register::Rcx, 0)
+                    .mov_q_imm(CX, 0)
                     // Arg 0: stdout
-                    .mov_reg_imm64(Register::Rdi, 1)
+                    .mov_q_imm(DI, 1)
                     // Arg 1: address of the word on the stack
-                    .store_reg_reg(Register::Rsi, Register::Rbp)
-                    .add_reg_imm32(Register::Rsi, (stack_index - WORD_SIZE) as i32)
+                    .mov_q(SI, BP)
+                    .add_q_imm(SI, stack_index - WORD_SIZE as i32)
                     // Arg 2: length of the data (a single byte)
-                    .mov_reg_imm32(Register::Rdx, 1)
+                    .mov_q_imm(DX, 1)
                     .syscall()
                     // Restore RSI
-                    .store_indirect_reg(Register::Rsi, Indirect(Register::Rbp, stack_index as i8))
+                    .mov_q(SI, Ind(BP, stack_index))
                     // Return nil
-                    .mov_reg_imm64(Register::Rax, Object::Nil.to_word());
+                    .mov_q_imm64(AX, Object::Nil.to_word());
             }
             "string-length" => {
                 self.buffer
                     // Mask away the header
-                    .mov_reg_imm64(Register::Rdi, PAYLOAD_MASK)
-                    .and_reg_reg(Register::Rax, Register::Rdi)
+                    .mov_q_imm64(DI, PAYLOAD_MASK)
+                    .and_q(AX, DI)
                     // Fetch the contents of [RAX]
-                    .store_indirect_reg(Register::Rax, Indirect(Register::Rax, 0))
+                    .mov_q(AX, Ind(AX, 0))
                     // Add the Int header
-                    .mov_reg_imm64(Register::Rdi, Object::Int(0).to_word())
-                    .or_reg_reg(Register::Rax, Register::Rdi);
+                    .mov_q_imm64(DI, Object::Int(0).to_word())
+                    .or_q(AX, DI);
             }
             "string-ref" => {
                 self.buffer
                     // Retrieve the offset (second arg) without the int header
-                    .store_indirect_reg32(Register::Rdi, Indirect(Register::Rbp, stack_index as i8))
+                    .mov_d(DI, Ind(BP, stack_index))
                     // Add the byte offset (second arg) to the address
                     // TODO this could be done instead with [Rax+Rdi+8] addressing
-                    .add_reg_reg(Register::Rax, Register::Rdi)
+                    .add_q(AX, DI)
                     // Mask away the header
-                    .mov_reg_imm64(Register::Rdi, PAYLOAD_MASK)
-                    .and_reg_reg(Register::Rax, Register::Rdi)
+                    .mov_q_imm64(DI, PAYLOAD_MASK)
+                    .and_q(AX, DI)
                     // Fetch the contents of [RAX+8] into the low byte of RAX
-                    .store_indirect_reg8(ByteRegister::Al, Indirect(Register::Rax, WORD_SIZE as i8))
-                    .and_reg_imm32(Register::Rax, 0xff)
+                    .movzx_q(AX, Ind(AX, WORD_SIZE as i32))
                     // Add the Char header
-                    .mov_reg_imm64(Register::Rdi, Object::Char(0).to_word())
-                    .or_reg_reg(Register::Rax, Register::Rdi);
+                    .mov_q_imm64(DI, Object::Char(0).to_word())
+                    .or_q(AX, DI);
             }
             "print" => {
                 self.buffer
                     // Save RSI
-                    .store_reg_indirect(Indirect(Register::Rbp, stack_index as i8), Register::Rsi)
+                    .mov_q(Ind(BP, stack_index), SI)
                     // Mask away the header
-                    .mov_reg_imm64(Register::Rdi, PAYLOAD_MASK)
-                    .and_reg_reg(Register::Rax, Register::Rdi)
+                    .mov_q_imm64(DI, PAYLOAD_MASK)
+                    .and_q(AX, DI)
                     // Arg 0: stdout
-                    .mov_reg_imm64(Register::Rdi, 1)
+                    .mov_d_imm(DI, 1)
                     // Arg 1: address of the word on the stack
-                    .store_reg_reg(Register::Rsi, Register::Rax)
-                    .add_reg_imm32(Register::Rsi, WORD_SIZE as i32)
+                    .mov_q(SI, AX)
+                    .add_q_imm(SI, WORD_SIZE as i32)
                     // Arg 2: length of the data
-                    .store_indirect_reg(Register::Rdx, Indirect(Register::Rax, 0))
-                    .store_reg_reg_32(Register::Rdx, Register::Rdx)
+                    .mov_d(DX, Ind(AX, 0))
                     // Syscall number: write
-                    .mov_reg_imm32(Register::Rax, Syscall::Write as i32)
+                    .mov_d_imm(AX, Syscall::Write)
                     // Return address: we don't care
-                    .mov_reg_imm32(Register::Rcx, 0)
+                    .mov_d_imm(CX, 0)
                     .syscall()
                     // Restore RSI
-                    .store_indirect_reg(Register::Rsi, Indirect(Register::Rbp, stack_index as i8))
+                    .mov_q(SI, Ind(BP, stack_index))
                     // Return nil
-                    .mov_reg_imm64(Register::Rax, Object::Nil.to_word());
+                    .mov_q_imm64(AX, Object::Nil.to_word());
             }
             _ => {
                 panic!("undefined function '{}'", name);
@@ -386,7 +380,7 @@ impl<'buffer> Compiler<'buffer> {
         }
     }
 
-    fn expr(&mut self, obj: &Object, stack_index: i64, env: &Env) {
+    fn expr(&mut self, obj: &Object, stack_index: i32, env: &Env) {
         match obj {
             Pair(box car, box cdr) => {
                 if let Symbol(s) = car {
@@ -398,44 +392,38 @@ impl<'buffer> Compiler<'buffer> {
             Symbol(s) => {
                 if let Some(loc) = env.find(s) {
                     // Load local into RAX
-                    self.buffer
-                        .store_indirect_reg(Register::Rax, Indirect(Register::Rbp, loc as i8));
+                    self.buffer.mov_q(AX, Ind(BP, loc));
                 } else {
                     panic!("unbound symbol '{}'", s);
                 }
             }
             Object::String(s) => {
                 // length
-                self.buffer
-                    .store_indirect_imm32(Indirect(Register::Rsi, 0), s.len() as i32);
+                self.buffer.mov_d_imm(Ind(SI, 0), s.len() as u32);
                 // characters
+                // TODO do this per-double word
                 for (i, b) in s.as_bytes().iter().enumerate() {
-                    self.buffer.store_indirect_imm8(
-                        Indirect(Register::Rsi, WORD_SIZE as i8 + i as i8),
-                        *b,
-                    );
+                    self.buffer.mov_bl_imm(Ind(SI, (WORD_SIZE + i) as i32), *b);
                 }
                 // Return string
                 // TODO this is not a smart way to get the String header
                 self.buffer
-                    .mov_reg_imm64(Register::Rax, Object::String("".to_owned()).to_word())
-                    .add_reg_reg(Register::Rax, Register::Rsi);
+                    .mov_q_imm64(AX, Object::String("".to_owned()).to_word())
+                    .add_q(AX, SI);
 
                 // Bump RSI (word-aligned)
-                self.buffer.add_reg_imm32(
-                    Register::Rsi,
-                    ((1 + s.len() as i64 / WORD_SIZE) * WORD_SIZE) as i32,
-                );
+                self.buffer
+                    .add_q_imm(SI, ((1 + s.len() / WORD_SIZE) * WORD_SIZE) as i32);
             }
             _ => {
-                self.buffer.mov_reg_imm64(Register::Rax, obj.to_word());
+                self.buffer.mov_q_imm64(AX, obj.to_word());
             }
         }
     }
 
     pub fn function(&mut self, obj: &Object) {
         self.buffer.prologue();
-        self.buffer.store_reg_reg(Register::Rsi, Register::Rdi);
+        self.buffer.mov_q(SI, DI);
         self.expr(obj, -8, &Env::new());
         self.buffer.epilogue();
     }
@@ -863,6 +851,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "cargo test capture prevents testing stdout properly"]
     fn test_compile_putchar() -> Result<()> {
         let buffer = compile_expr(r"(putchar #\x)");
         let mut redirect = BufferRedirect::stdout().unwrap();
@@ -921,6 +910,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "cargo test capture prevents testing stdout properly"]
     fn test_compile_print() -> Result<()> {
         const STR: &str = "hi beautiful ✨";
         let buffer = compile_expr(&format!(r#"(print "{}")"#, STR));
